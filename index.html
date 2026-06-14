@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Kognitif VR Labirent - Stabil Çekirdek</title>
+    <title>Kognitif VR Labirent - Kesin Çekirdek</title>
     <style>
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
         body, html {
@@ -13,7 +13,6 @@
         }
         #canvas-container { width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
         
-        /* Başlangıç ve İzin Ekranı (Overlay) */
         #vr-overlay {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(10, 10, 15, 0.95); z-index: 1000;
@@ -23,11 +22,8 @@
         .vr-start-btn {
             background: #2563eb; color: white; border: none; padding: 16px 32px;
             font-size: 18px; font-weight: bold; border-radius: 30px; cursor: pointer;
-            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4); transition: transform 0.2s;
+            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
         }
-        .vr-start-btn:active { transform: scale(0.95); }
-        
-        /* Oyun İçi Küçük Kalibrasyon Butonu */
         #btn-calibrate {
             position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
             z-index: 999; background: rgba(255, 255, 255, 0.2); border: 1px solid rgba(255, 255, 255, 0.4);
@@ -42,7 +38,7 @@
 
     <div id="vr-overlay">
         <h2>KOGNİTİF VR LABİRENT</h2>
-        <p>Lütfen telefonu yatay konuma getirin ve VR Gözlüğe takmadan önce Başlat'a basın.</p>
+        <p>Lütfen telefonu yatay konuma getirin ve Başlat'a basın.</p>
         <button class="vr-start-btn" id="btn-start">VR MODUNU BAŞLAT</button>
     </div>
 
@@ -53,42 +49,19 @@
         let scene, camera, renderer, effect;
         let container = document.getElementById('canvas-container');
         
-        // Jiroskop ve Yumuşatma (Slerp) Değişkenleri
-        let currentQuaternion = new THREE.Quaternion();
-        let targetQuaternion = new THREE.Quaternion();
-        let sensorBiasQuaternion = new THREE.Quaternion();
-        const SMOOTH_FACTOR = 0.2; // Mobil gecikmesini azaltmak için hafif artırıldı
+        // --- ASLA DEĞİŞMEYECEK ÇEKİRDEK QUATERNION & SLERP MİMARİSİ ---
+        let rawSensorQuaternion = new THREE.Quaternion(); // Sensörden gelen saf gürültülü veri
+        let calibratedTarget = new THREE.Quaternion();    // Kalibrasyon ve eksen düzeltmesi uygulanmış saf hedef
+        let currentQuaternion = new THREE.Quaternion();   // Kameraya basılan, slerp ile filtrelenmiş nihai veri
+        let sensorBiasQuaternion = new THREE.Quaternion(); // Kalibrasyon ofseti
+        
+        const SMOOTH_FACTOR = 0.12; // Jitter'ı (atlamayı) tamamen yutan ideal yumuşatma katsayısı
 
-        // Mobil Eksen Düzeltme Objeleri (Asla değişmeyecek sabitler)
+        // Sabit Eksen Dönüşüm Matrisleri (Cihazın uzaydaki yönünü VR standartlarına kilitler)
         const zee = new THREE.Vector3(0, 0, 1);
-        const eulerOrder = 'YXZ';
-        const worldTransform = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -90 deg X
+        const worldTransform = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -90 derece X ekseni
 
-        // --- 1. GÜVENLİ SENSÖR İZİN MEKANİZMASI ---
-        async function requestSensorsPermission() {
-            // iOS 13+ Cihazlar için kontrol
-            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-                try {
-                    const permissionState = await DeviceOrientationEvent.requestPermission();
-                    if (permissionState === 'granted') {
-                        window.addEventListener('deviceorientation', onDeviceOrientation, false);
-                        return true;
-                    } else {
-                        alert('Jiroskop izni reddedildi. VR modu çalışamaz.');
-                        return false;
-                    }
-                } catch (error) {
-                    console.error(error);
-                    return false;
-                }
-            } else {
-                // Android veya Eski iOS Cihazlar doğrudan dinleyebilir
-                window.addEventListener('deviceorientation', onDeviceOrientation, false);
-                return true;
-            }
-        }
-
-        // --- 2. LANDSCAPE UYUMLU EKASEN HESAPLAMA ---
+        // --- 1. SENSÖR VERİ TOPLAMA (YALNIZCA SAF VERİ ALIR) ---
         function onDeviceOrientation(event) {
             if (event.alpha === null) return;
 
@@ -96,22 +69,30 @@
             const beta = THREE.MathUtils.degToRad(event.beta);
             const gamma = THREE.MathUtils.degToRad(event.gamma);
             
-            // Ekranın dönüş açısını al (Yatay/Dikey durum kontrolü)
-            const orient = window.orientation ? THREE.MathUtils.degToRad(window.orientation) : 0;
-
-            // Ham veriyi Euler'e dök
-            const euler = new THREE.Euler(beta, alpha, -gamma, eulerOrder);
-            
-            // Telefon yatay çevrildiğinde çökmeyi önleyen Quaternion dönüşümü
-            targetQuaternion.setFromEuler(euler);
-            targetQuaternion.multiply(worldTransform);
-            targetQuaternion.multiply(currentQuaternion.setFromAxisAngle(zee, -orient));
+            // Ham sensör verisini Euler üzerinden doğrudan kuaterniyona çevir (Matematiksel manipülasyon loop'a kalıyor)
+            rawSensorQuaternion.setFromEuler(new THREE.Euler(beta, alpha, -gamma, 'YXZ'));
         }
 
-        // --- 3. ANA KURULUM ---
+        async function requestSensorsPermission() {
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try {
+                    const permissionState = await DeviceOrientationEvent.requestPermission();
+                    if (permissionState === 'granted') {
+                        window.addEventListener('deviceorientation', onDeviceOrientation, false);
+                        return true;
+                    }
+                    return false;
+                } catch (e) { return false; }
+            } else {
+                window.addEventListener('deviceorientation', onDeviceOrientation, false);
+                return true;
+            }
+        }
+
+        // --- 2. ANA KURULUM ---
         function init() {
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x0a0a0f);
+            scene.background = new THREE.Color(0x050508);
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
             camera.position.set(0, 1.6, 0); 
@@ -119,37 +100,48 @@
 
             renderer = new THREE.WebGLRenderer({ 
                 antialias: true, 
-                powerPreference: "high-performance",
+                powerPreference: "high-performance", // Ekran kartını zorlayan yüksek performans modu aktif
                 precision: "mediump"
             });
-            // Çift ekranda piksel taşmasını önlemek için 2 ile sınırla
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             renderer.setSize(window.innerWidth, window.innerHeight);
             container.appendChild(renderer.domElement);
 
-            // Stereoscopic Efekt
             effect = new THREE.StereoEffect(renderer);
             effect.setEyeSeparation(0.064); 
             effect.setSize(window.innerWidth, window.innerHeight);
 
-            // Basit Işık ve Test Izgarası
+            // Test alanı
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
             scene.add(ambientLight);
-
-            const grid = new THREE.GridHelper(60, 60, 0x3b82f6, 0x1e293b);
-            grid.position.y = 0;
+            const grid = new THREE.GridHelper(60, 60, 0x2563eb, 0x0f172a);
             scene.add(grid);
 
             window.addEventListener('resize', onWindowResize, false);
         }
 
+        // --- 3. JITTER ENGELLEMELI ANA RENDER DÖNGÜSÜ (CORE) ---
         function animate() {
             requestAnimationFrame(animate);
-            
-            // Slerp ile yumuşatılmış jiroskop takibi
-            currentQuaternion.slerp(targetQuaternion, SMOOTH_FACTOR);
-            camera.quaternion.copy(sensorBiasQuaternion).multiply(currentQuaternion);
 
+            // 1. Adım: Telefonun Landscape/Yatay durumuna göre ekran açısını al
+            const orient = window.orientation ? THREE.MathUtils.degToRad(window.orientation) : 0;
+            
+            // 2. Adım: Ham sensör verisine ekran yönü ve dünya matrisi düzeltmelerini sırayla uygula
+            calibratedTarget.copy(rawSensorQuaternion);
+            calibratedTarget.multiply(worldTransform);
+            calibratedTarget.multiply(new THREE.Quaternion().setFromAxisAngle(zee, -orient));
+
+            // 3. Adım: Kalibrasyon (Sensör Sıfırlama) ofsetini temiz hedefe yedir
+            calibratedTarget.premultiply(sensorBiasQuaternion);
+
+            // 4. Adım: Jitter Engelleme (Slerp) - Mevcut kamerayı gürültüsüz şekilde hedefe yumuşatarak yaklaştır
+            currentQuaternion.slerp(calibratedTarget, SMOOTH_FACTOR);
+            
+            // 5. Adım: Kusursuz kuaterniyonu kameraya bas
+            camera.quaternion.copy(currentQuaternion);
+
+            // Çift Ekran Render
             effect.render(scene, camera);
         }
 
@@ -159,31 +151,28 @@
             effect.setSize(window.innerWidth, window.innerHeight);
         }
 
-        // --- 4. ETKİLEŞİM VE BAŞLATMA ---
+        // --- 4. ETKİLEŞİM ---
         document.getElementById('btn-start').addEventListener('click', async () => {
-            // Önce sensör izni iste
             const permitted = await requestSensorsPermission();
             if (!permitted) return;
 
-            // Tam ekrana geç (Adres barını uçur)
             if (document.documentElement.requestFullscreen) {
                 document.documentElement.requestFullscreen().catch(e => console.log(e));
-            } else if (document.documentElement.webkitRequestFullscreen) { /* iOS Safari */
+            } else if (document.documentElement.webkitRequestFullscreen) {
                 document.documentElement.webkitRequestFullscreen();
             }
 
-            // Arayüzü güncelle
             document.getElementById('vr-overlay').style.display = 'none';
             document.getElementById('btn-calibrate').style.display = 'block';
 
-            // Sistemleri tetikle
             init();
             animate();
         });
 
-        // Bakış açısını sıfırlama (Kullanıcı kafasını dik tutup basmalı)
+        // Bakış Sıfırlama Mekanizması (Hiyerarşiyi bozmamak için premultiply ofsetini ayarlar)
         document.getElementById('btn-calibrate').addEventListener('touchend', (e) => {
             e.preventDefault();
+            // Jitter'lı veriyi değil, o anki filtrelenmiş temiz yönü baz alarak tersini hesapla
             sensorBiasQuaternion.copy(currentQuaternion).invert();
         });
     </script>
