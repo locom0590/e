@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>VR Elma Toplama Oyunu</title>
+    <title>VR Elma Toplama Oyunu - Gelişmiş</title>
     <style>
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
         body, html {
@@ -38,7 +38,7 @@
 
     <div id="vr-overlay">
         <h2>VR ELMA TOPLAMA OYUNU</h2>
-        <p>Bakışınızla sepeti sağa/sola kaydırarak elmaları yakalayın.<br>Başlat'a basmadan önce telefonu yatay konuma getirin.</p>
+        <p>Yeşil Elma: +1 Puan (Tik) | Kırmızı Elma: -1 Puan (Çarpı)<br>Başlat'a basmadan önce telefonu yatay konuma getirin.</p>
         <button class="vr-start-btn" id="btn-start">OYUNU BAŞLAT</button>
     </div>
 
@@ -46,7 +46,7 @@
     <div id="canvas-container"></div>
 
     <script>
-        let scene, camera, renderer, effect;
+        let scene, camera, renderer, effect, audioCtx;
         let container = document.getElementById('canvas-container');
         
         // --- ASLA DEĞİŞMEYECEK ÇEKİRDEK QUATERNION & SLERP MİMARİSİ ---
@@ -62,16 +62,17 @@
         // --- OYUN ELEMENTLERİ VE MEKANİK DEĞİŞKENLERİ ---
         let basket; 
         let apples = [];
+        let feedbackSprites = [];
         let score = 0;
         let lastAppleSpawnTime = 0;
-        const spawnInterval = 1500; // Yeni elma düşme sıklığı (ms)
-        const appleFallSpeed = 0.08; // Elmaların düşme hızı
         
-        // 5 Görünmez Kanalın X Koordinatları (Sağda 2, Solda 2, Ortada 1)
+        const spawnInterval = 1500; 
+        const appleFallSpeed = 0.04; // Hız tam yarıya indirildi (Eski değer: 0.08)
+        
         const lanes = [-3.0, -1.5, 0.0, 1.5, 3.0]; 
-        const spawnHeight = 7.0; // Elmaların yukarıdan başlayacağı yükseklik
-        const horizonHeight = 1.2; // Sepetin duracağı sabit ufak/horizon çizgisi yüksekliği
-        const catchRadius = 0.6; // Yakalama mesafesi toleransı
+        const spawnHeight = 7.0; 
+        const horizonHeight = 0.2; // Sepet doğrudan düşen elmaların zemin hizasına çekildi
+        const catchRadius = 0.6; 
 
         function onDeviceOrientation(event) {
             if (event.alpha === null) return;
@@ -97,13 +98,102 @@
             }
         }
 
-        // --- SAHNE OLUŞTURMA VE OYUN ALANI ---
+        // --- WEB AUDIO API SYNTHESIZER SOUND GENERATORS ---
+        function initAudio() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function playSound(isPositive) {
+            if (!audioCtx) return;
+            // Tarayıcı uyku modundaysa uyandır
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            if (isPositive) {
+                // Güzel "Oldu" Sesi: İnce, yukarı doğru tırmanan iki tonlu melodik bip
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(523.25, audioCtx.currentTime); // C5 notası
+                osc.frequency.setValueAtTime(659.25, audioCtx.currentTime + 0.08); // E5 notası
+                gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.25);
+            } else {
+                // Kötü "Olmadı" Sesi: Kalın, aniden düşen testere dişi bas tonu
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(180, audioCtx.currentTime);
+                osc.frequency.linearRampToValueAtTime(90, audioCtx.currentTime + 0.2);
+                gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.25);
+            }
+        }
+
+        // --- 2D CANVAS ILE VEKTÖREL UI ICON GENERATOR ---
+        function createFeedbackTexture(type) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128;
+            canvas.height = 128;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, 128, 128);
+
+            if (type === 'success') {
+                // Yeşil Tik Çizimi
+                ctx.strokeStyle = '#22c55e';
+                ctx.lineWidth = 14;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.beginPath();
+                ctx.moveTo(25, 65);
+                ctx.lineTo(53, 93);
+                ctx.lineTo(105, 35);
+                ctx.stroke();
+            } else {
+                // Kırmızı Çarpı Çizimi
+                ctx.strokeStyle = '#ef4444';
+                ctx.lineWidth = 14;
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.moveTo(32, 32);
+                ctx.lineTo(96, 96);
+                ctx.moveTo(96, 32);
+                ctx.lineTo(32, 96);
+                ctx.stroke();
+            }
+
+            const texture = new THREE.CanvasTexture(canvas);
+            return texture;
+        }
+
+        function spawnFeedback(type, xPosition) {
+            const texture = createFeedbackTexture(type);
+            const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+            const sprite = new THREE.Sprite(material);
+            
+            // İşareti sepet hizasında, elmanın yakalandığı X pozisyonunda başlatır
+            sprite.position.set(xPosition, horizonHeight + 0.5, 0);
+            sprite.scale.set(0.6, 0.6, 1);
+            
+            scene.add(sprite);
+            feedbackSprites.push({
+                mesh: sprite,
+                lifetime: 0,
+                maxLifetime: 45 // ekran döngüsü sayısı kadar kalacak (~0.7 saniye)
+            });
+        }
+
+        // --- SAHNE KURULUMU ---
         function init() {
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x0f172a); // Koyu lacivert gökyüzü arka planı
+            scene.background = new THREE.Color(0x0f172a); 
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
-            camera.position.set(0, 1.6, 4.5); // Kamerayı arkaya aldık ki sepet ve düşen elmalar rahat görünsün
+            camera.position.set(0, 1.6, 4.5); 
             scene.add(camera);
 
             renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance", precision: "mediump" });
@@ -115,117 +205,123 @@
             effect.setEyeSeparation(0.064); 
             effect.setSize(window.innerWidth, window.innerHeight);
 
-            // Işıklandırma
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
             scene.add(ambientLight);
             const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
             dirLight.position.set(5, 10, 5);
             scene.add(dirLight);
 
-            // Oyun Alanı Tabanı (Referans Zemin)
             const grid = new THREE.GridHelper(40, 40, 0x334155, 0x1e293b);
             grid.position.y = 0;
             scene.add(grid);
 
-            // SEPET OLUŞTURMA (Horizon hizasında, başlangıçta ortada)
+            // SEPET OLUŞTURMA (y = horizonHeight konumunda zemin hizasında duruyor)
             const basketGeo = new THREE.CylinderGeometry(0.5, 0.3, 0.4, 16);
-            const basketMat = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.5 }); // Sarı sepet
+            const basketMat = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.5 }); 
             basket = new THREE.Mesh(basketGeo, basketMat);
-            basket.position.set(0, horizonHeight, 0); // Z ekseni 0'da, kanalların altında
+            basket.position.set(0, horizonHeight, 0); 
             scene.add(basket);
-
-            // Kanal Hizalarını Görmek İstersek/İleride Lazım Olursa Diye Kanalların Alt Noktalarına Küçük İşaretçiler
-            lanes.forEach(laneX => {
-                const markerGeo = new THREE.BoxGeometry(0.1, 0.02, 0.1);
-                const markerMat = new THREE.MeshBasicMaterial({ color: 0x475569 });
-                const marker = new THREE.Mesh(markerGeo, markerMat);
-                marker.position.set(laneX, 0.01, 0);
-                scene.add(marker);
-            });
 
             window.addEventListener('resize', onWindowResize, false);
         }
 
-        // --- ELMA ÜRETİM MEKANİZMASI ---
         function spawnApple() {
-            // 5 kanaldan rastgele birini seç
             const randomLaneIndex = Math.floor(Math.random() * lanes.length);
             const laneX = lanes[randomLaneIndex];
 
-            // Elma Mesh (Low-poly kırmızı küre)
+            // %50 İhtimalle Yeşil veya Kırmızı Elma Tipi Belirleme
+            const isGreen = Math.random() > 0.5;
+            const appleColor = isGreen ? 0x22c55e : 0xef4444; // Yeşil veya Kırmızı
+
             const appleGeo = new THREE.SphereGeometry(0.2, 8, 8);
-            const appleMat = new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.3 });
+            const appleMat = new THREE.MeshStandardMaterial({ color: appleColor, roughness: 0.3 });
             const apple = new THREE.Mesh(appleGeo, appleMat);
             
-            // Seçilen kanal koordinatında havada başlat
             apple.position.set(laneX, spawnHeight, 0);
+            // Elmanın tipini taşımak için mesh nesnesine özel veri inject ediyoruz
+            apple.userData = { isGreen: isGreen };
             
             scene.add(apple);
             apples.push(apple);
         }
 
-        // --- ANA OYUN DÖNGÜSÜ VE PÜRÜZSÜZ TAKİP ---
+        // --- ANA DÖNGÜ VE RENDER ---
         function animate(currentTime) {
             requestAnimationFrame(animate);
 
-            // 1. Jiroskop Takip Hesaplamaları (Çekirdek Yapı)
+            // 1. Jiroskop Takip Hesaplamaları
             const orient = window.orientation ? THREE.MathUtils.degToRad(window.orientation) : 0;
             calibratedTarget.copy(rawSensorQuaternion);
             calibratedTarget.multiply(worldTransform);
             calibratedTarget.multiply(new THREE.Quaternion().setFromAxisAngle(zee, -orient));
             calibratedTarget.premultiply(sensorBiasQuaternion);
 
-            // Pürüzsüz Slerp Filtresi
             currentQuaternion.slerp(calibratedTarget, SMOOTH_FACTOR);
             camera.quaternion.copy(currentQuaternion);
 
-            // 2. BAKIŞA GÖRE SEPETİN SADECE SAĞA/SOLA KAYDIRILMASI
-            // Kameranın baktığı yön vektörünü alıyoruz
+            // 2. Pürüzsüz Sepet Hareketi
             const lookDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-            
-            // Kameranın dönüş açısına göre sepetin X eksenindeki yerini pürüzsüzce güncelle
-            // lookDirection.x oranını hassasiyet çarpanı (örneğin 8.0) ile çarparak kanallara yetişmesini sağlıyoruz
             let targetX = lookDirection.x * 8.0;
-            
-            // Sepeti en dış kanalların biraz ötesine taşmayacak şekilde sınırla (-4 ile 4 arası)
             targetX = Math.max(-4.0, Math.min(4.0, targetX));
-            
-            // Sepetin pürüzsüz imleç takibini koruyarak sadece X ekseninde hareket ettiriyoruz
             basket.position.x = THREE.MathUtils.lerp(basket.position.x, targetX, SMOOTH_FACTOR * 1.5);
 
-            // 3. OYUN MANTIĞI: ELMALARIN DÜŞMESİ VE YAKALAMA KONTROLÜ
+            // 3. Elma Doğurma Tetikleyicisi
             if (currentTime - lastAppleSpawnTime > spawnInterval) {
                 spawnApple();
                 lastAppleSpawnTime = currentTime;
             }
 
+            // 4. Elma Davranış Kontrolleri
             for (let i = apples.length - 1; i >= 0; i--) {
                 const apple = apples[i];
                 
-                // Elmayı aşağı düşür
-                apple.position.y -= appleFallSpeed;
+                apple.position.y -= appleFallSpeed; // Yarı hızda düşüyor (0.04)
 
-                // Sepet ile elma arasındaki mesafeyi kontrol et (Yakalama Kontrolü)
                 const distanceX = Math.abs(apple.position.x - basket.position.x);
                 const distanceY = Math.abs(apple.position.y - basket.position.y);
 
-                // Eğer elma sepet hizasına geldiyse ve X ekseninde yakınsa yakala
+                // Yakalama Gerçekleştiğinde
                 if (distanceY < 0.3 && distanceX < catchRadius) {
+                    const caughtGreen = apple.userData.isGreen;
+                    
+                    if (caughtGreen) {
+                        score += 1;
+                        playSound(true); // Pozitif Melodi
+                        spawnFeedback('success', apple.position.x); // Yeşil Tik
+                    } else {
+                        score -= 1;
+                        playSound(false); // Negatif Bas
+                        spawnFeedback('fail', apple.position.x); // Kırmızı Çarpı
+                    }
+
+                    console.log("Mevcut Skor: " + score);
                     scene.remove(apple);
                     apples.splice(i, 1);
-                    score++;
-                    console.log("Skor: " + score); // Geliştirici konsol takibi için
                     continue;
                 }
 
-                // Elma zemine düştüyse (Yakalanamadıysa) yok et
+                // Zemine çarpıp kaybolma limiti
                 if (apple.position.y < 0) {
                     scene.remove(apple);
                     apples.splice(i, 1);
                 }
             }
 
-            // Çift ekran VR render tetiklemesi
+            // 5. 3D Tik/Çarpı Efektlerinin Yukarı Süzülme Animasyonu
+            for (let j = feedbackSprites.length - 1; j >= 0; j--) {
+                const f = feedbackSprites[j];
+                f.lifetime++;
+                f.mesh.position.y += 0.02; // Hafif yukarı yükselme efekti
+                
+                // Ömrü dolan işareti sahneden temizle
+                if (f.lifetime > f.maxLifetime) {
+                    scene.remove(f.mesh);
+                    f.mesh.material.map.dispose();
+                    f.mesh.material.dispose();
+                    feedbackSprites.splice(j, 1);
+                }
+            }
+
             effect.render(scene, camera);
         }
 
@@ -235,10 +331,12 @@
             effect.setSize(window.innerWidth, window.innerHeight);
         }
 
-        // --- ETKİLEŞİM VE TETİKLEME ---
+        // --- ETKİLEŞİM VE OYUN BAŞLATMA ---
         document.getElementById('btn-start').addEventListener('click', async () => {
             const permitted = await requestSensorsPermission();
             if (!permitted) return;
+
+            initAudio(); // Ses kartı motorunu init et
 
             if (document.documentElement.requestFullscreen) {
                 document.documentElement.requestFullscreen().catch(e => console.log(e));
@@ -250,7 +348,6 @@
             document.getElementById('btn-calibrate').style.display = 'block';
 
             init();
-            // Zaman parametresini alan animate döngüsünü başlatıyoruz
             requestAnimationFrame(animate);
         });
 
