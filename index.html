@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Kognitif VR Labirent - Kesin Çekirdek</title>
+    <title>VR Elma Toplama Oyunu</title>
     <style>
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
         body, html {
@@ -20,9 +20,9 @@
             color: white; text-align: center; padding: 20px;
         }
         .vr-start-btn {
-            background: #2563eb; color: white; border: none; padding: 16px 32px;
+            background: #22c55e; color: white; border: none; padding: 16px 32px;
             font-size: 18px; font-weight: bold; border-radius: 30px; cursor: pointer;
-            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
+            box-shadow: 0 4px 14px rgba(34, 197, 94, 0.4);
         }
         #btn-calibrate {
             position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
@@ -37,9 +37,9 @@
 <body>
 
     <div id="vr-overlay">
-        <h2>KOGNİTİF VR LABİRENT</h2>
-        <p>Lütfen telefonu yatay konuma getirin ve Başlat'a basın.</p>
-        <button class="vr-start-btn" id="btn-start">VR MODUNU BAŞLAT</button>
+        <h2>VR ELMA TOPLAMA OYUNU</h2>
+        <p>Bakışınızla sepeti sağa/sola kaydırarak elmaları yakalayın.<br>Başlat'a basmadan önce telefonu yatay konuma getirin.</p>
+        <button class="vr-start-btn" id="btn-start">OYUNU BAŞLAT</button>
     </div>
 
     <button id="btn-calibrate">BAKIŞI SIFIRLA</button>
@@ -50,26 +50,34 @@
         let container = document.getElementById('canvas-container');
         
         // --- ASLA DEĞİŞMEYECEK ÇEKİRDEK QUATERNION & SLERP MİMARİSİ ---
-        let rawSensorQuaternion = new THREE.Quaternion(); // Sensörden gelen saf gürültülü veri
-        let calibratedTarget = new THREE.Quaternion();    // Kalibrasyon ve eksen düzeltmesi uygulanmış saf hedef
-        let currentQuaternion = new THREE.Quaternion();   // Kameraya basılan, slerp ile filtrelenmiş nihai veri
-        let sensorBiasQuaternion = new THREE.Quaternion(); // Kalibrasyon ofseti
+        let rawSensorQuaternion = new THREE.Quaternion();
+        let calibratedTarget = new THREE.Quaternion();   
+        let currentQuaternion = new THREE.Quaternion();  
+        let sensorBiasQuaternion = new THREE.Quaternion();
         
-        const SMOOTH_FACTOR = 0.12; // Jitter'ı (atlamayı) tamamen yutan ideal yumuşatma katsayısı
-
-        // Sabit Eksen Dönüşüm Matrisleri (Cihazın uzaydaki yönünü VR standartlarına kilitler)
+        const SMOOTH_FACTOR = 0.12; 
         const zee = new THREE.Vector3(0, 0, 1);
-        const worldTransform = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -90 derece X ekseni
+        const worldTransform = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
 
-        // --- 1. SENSÖR VERİ TOPLAMA (YALNIZCA SAF VERİ ALIR) ---
+        // --- OYUN ELEMENTLERİ VE MEKANİK DEĞİŞKENLERİ ---
+        let basket; 
+        let apples = [];
+        let score = 0;
+        let lastAppleSpawnTime = 0;
+        const spawnInterval = 1500; // Yeni elma düşme sıklığı (ms)
+        const appleFallSpeed = 0.08; // Elmaların düşme hızı
+        
+        // 5 Görünmez Kanalın X Koordinatları (Sağda 2, Solda 2, Ortada 1)
+        const lanes = [-3.0, -1.5, 0.0, 1.5, 3.0]; 
+        const spawnHeight = 7.0; // Elmaların yukarıdan başlayacağı yükseklik
+        const horizonHeight = 1.2; // Sepetin duracağı sabit ufak/horizon çizgisi yüksekliği
+        const catchRadius = 0.6; // Yakalama mesafesi toleransı
+
         function onDeviceOrientation(event) {
             if (event.alpha === null) return;
-
             const alpha = THREE.MathUtils.degToRad(event.alpha);
             const beta = THREE.MathUtils.degToRad(event.beta);
             const gamma = THREE.MathUtils.degToRad(event.gamma);
-            
-            // Ham sensör verisini Euler üzerinden doğrudan kuaterniyona çevir (Matematiksel manipülasyon loop'a kalıyor)
             rawSensorQuaternion.setFromEuler(new THREE.Euler(beta, alpha, -gamma, 'YXZ'));
         }
 
@@ -89,20 +97,16 @@
             }
         }
 
-        // --- 2. ANA KURULUM ---
+        // --- SAHNE OLUŞTURMA VE OYUN ALANI ---
         function init() {
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x050508);
+            scene.background = new THREE.Color(0x0f172a); // Koyu lacivert gökyüzü arka planı
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
-            camera.position.set(0, 1.6, 0); 
+            camera.position.set(0, 1.6, 4.5); // Kamerayı arkaya aldık ki sepet ve düşen elmalar rahat görünsün
             scene.add(camera);
 
-            renderer = new THREE.WebGLRenderer({ 
-                antialias: true, 
-                powerPreference: "high-performance", // Ekran kartını zorlayan yüksek performans modu aktif
-                precision: "mediump"
-            });
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance", precision: "mediump" });
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             renderer.setSize(window.innerWidth, window.innerHeight);
             container.appendChild(renderer.domElement);
@@ -111,37 +115,117 @@
             effect.setEyeSeparation(0.064); 
             effect.setSize(window.innerWidth, window.innerHeight);
 
-            // Test alanı
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            // Işıklandırma
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
             scene.add(ambientLight);
-            const grid = new THREE.GridHelper(60, 60, 0x2563eb, 0x0f172a);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            dirLight.position.set(5, 10, 5);
+            scene.add(dirLight);
+
+            // Oyun Alanı Tabanı (Referans Zemin)
+            const grid = new THREE.GridHelper(40, 40, 0x334155, 0x1e293b);
+            grid.position.y = 0;
             scene.add(grid);
+
+            // SEPET OLUŞTURMA (Horizon hizasında, başlangıçta ortada)
+            const basketGeo = new THREE.CylinderGeometry(0.5, 0.3, 0.4, 16);
+            const basketMat = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.5 }); // Sarı sepet
+            basket = new THREE.Mesh(basketGeo, basketMat);
+            basket.position.set(0, horizonHeight, 0); // Z ekseni 0'da, kanalların altında
+            scene.add(basket);
+
+            // Kanal Hizalarını Görmek İstersek/İleride Lazım Olursa Diye Kanalların Alt Noktalarına Küçük İşaretçiler
+            lanes.forEach(laneX => {
+                const markerGeo = new THREE.BoxGeometry(0.1, 0.02, 0.1);
+                const markerMat = new THREE.MeshBasicMaterial({ color: 0x475569 });
+                const marker = new THREE.Mesh(markerGeo, markerMat);
+                marker.position.set(laneX, 0.01, 0);
+                scene.add(marker);
+            });
 
             window.addEventListener('resize', onWindowResize, false);
         }
 
-        // --- 3. JITTER ENGELLEMELI ANA RENDER DÖNGÜSÜ (CORE) ---
-        function animate() {
+        // --- ELMA ÜRETİM MEKANİZMASI ---
+        function spawnApple() {
+            // 5 kanaldan rastgele birini seç
+            const randomLaneIndex = Math.floor(Math.random() * lanes.length);
+            const laneX = lanes[randomLaneIndex];
+
+            // Elma Mesh (Low-poly kırmızı küre)
+            const appleGeo = new THREE.SphereGeometry(0.2, 8, 8);
+            const appleMat = new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.3 });
+            const apple = new THREE.Mesh(appleGeo, appleMat);
+            
+            // Seçilen kanal koordinatında havada başlat
+            apple.position.set(laneX, spawnHeight, 0);
+            
+            scene.add(apple);
+            apples.push(apple);
+        }
+
+        // --- ANA OYUN DÖNGÜSÜ VE PÜRÜZSÜZ TAKİP ---
+        function animate(currentTime) {
             requestAnimationFrame(animate);
 
-            // 1. Adım: Telefonun Landscape/Yatay durumuna göre ekran açısını al
+            // 1. Jiroskop Takip Hesaplamaları (Çekirdek Yapı)
             const orient = window.orientation ? THREE.MathUtils.degToRad(window.orientation) : 0;
-            
-            // 2. Adım: Ham sensör verisine ekran yönü ve dünya matrisi düzeltmelerini sırayla uygula
             calibratedTarget.copy(rawSensorQuaternion);
             calibratedTarget.multiply(worldTransform);
             calibratedTarget.multiply(new THREE.Quaternion().setFromAxisAngle(zee, -orient));
-
-            // 3. Adım: Kalibrasyon (Sensör Sıfırlama) ofsetini temiz hedefe yedir
             calibratedTarget.premultiply(sensorBiasQuaternion);
 
-            // 4. Adım: Jitter Engelleme (Slerp) - Mevcut kamerayı gürültüsüz şekilde hedefe yumuşatarak yaklaştır
+            // Pürüzsüz Slerp Filtresi
             currentQuaternion.slerp(calibratedTarget, SMOOTH_FACTOR);
-            
-            // 5. Adım: Kusursuz kuaterniyonu kameraya bas
             camera.quaternion.copy(currentQuaternion);
 
-            // Çift Ekran Render
+            // 2. BAKIŞA GÖRE SEPETİN SADECE SAĞA/SOLA KAYDIRILMASI
+            // Kameranın baktığı yön vektörünü alıyoruz
+            const lookDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+            
+            // Kameranın dönüş açısına göre sepetin X eksenindeki yerini pürüzsüzce güncelle
+            // lookDirection.x oranını hassasiyet çarpanı (örneğin 8.0) ile çarparak kanallara yetişmesini sağlıyoruz
+            let targetX = lookDirection.x * 8.0;
+            
+            // Sepeti en dış kanalların biraz ötesine taşmayacak şekilde sınırla (-4 ile 4 arası)
+            targetX = Math.max(-4.0, Math.min(4.0, targetX));
+            
+            // Sepetin pürüzsüz imleç takibini koruyarak sadece X ekseninde hareket ettiriyoruz
+            basket.position.x = THREE.MathUtils.lerp(basket.position.x, targetX, SMOOTH_FACTOR * 1.5);
+
+            // 3. OYUN MANTIĞI: ELMALARIN DÜŞMESİ VE YAKALAMA KONTROLÜ
+            if (currentTime - lastAppleSpawnTime > spawnInterval) {
+                spawnApple();
+                lastAppleSpawnTime = currentTime;
+            }
+
+            for (let i = apples.length - 1; i >= 0; i--) {
+                const apple = apples[i];
+                
+                // Elmayı aşağı düşür
+                apple.position.y -= appleFallSpeed;
+
+                // Sepet ile elma arasındaki mesafeyi kontrol et (Yakalama Kontrolü)
+                const distanceX = Math.abs(apple.position.x - basket.position.x);
+                const distanceY = Math.abs(apple.position.y - basket.position.y);
+
+                // Eğer elma sepet hizasına geldiyse ve X ekseninde yakınsa yakala
+                if (distanceY < 0.3 && distanceX < catchRadius) {
+                    scene.remove(apple);
+                    apples.splice(i, 1);
+                    score++;
+                    console.log("Skor: " + score); // Geliştirici konsol takibi için
+                    continue;
+                }
+
+                // Elma zemine düştüyse (Yakalanamadıysa) yok et
+                if (apple.position.y < 0) {
+                    scene.remove(apple);
+                    apples.splice(i, 1);
+                }
+            }
+
+            // Çift ekran VR render tetiklemesi
             effect.render(scene, camera);
         }
 
@@ -151,7 +235,7 @@
             effect.setSize(window.innerWidth, window.innerHeight);
         }
 
-        // --- 4. ETKİLEŞİM ---
+        // --- ETKİLEŞİM VE TETİKLEME ---
         document.getElementById('btn-start').addEventListener('click', async () => {
             const permitted = await requestSensorsPermission();
             if (!permitted) return;
@@ -166,13 +250,12 @@
             document.getElementById('btn-calibrate').style.display = 'block';
 
             init();
-            animate();
+            // Zaman parametresini alan animate döngüsünü başlatıyoruz
+            requestAnimationFrame(animate);
         });
 
-        // Bakış Sıfırlama Mekanizması (Hiyerarşiyi bozmamak için premultiply ofsetini ayarlar)
         document.getElementById('btn-calibrate').addEventListener('touchend', (e) => {
             e.preventDefault();
-            // Jitter'lı veriyi değil, o anki filtrelenmiş temiz yönü baz alarak tersini hesapla
             sensorBiasQuaternion.copy(currentQuaternion).invert();
         });
     </script>
